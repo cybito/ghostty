@@ -507,7 +507,6 @@ class QuickTerminalController: BaseTerminalController {
                     // path (we have windows on this screen) it takes one event loop
                     // tick for window.isKeyWindow to return true.
                     DispatchQueue.main.async {
-                        guard !window.isKeyWindow else { return }
                         self.makeWindowKey(window, retries: 10)
                     }
                 }
@@ -534,8 +533,20 @@ class QuickTerminalController: BaseTerminalController {
         // The view must gain our keyboard focus
         window.makeFirstResponder(focusedSurface)
 
-        // If our window is already key then we're done!
-        guard !window.isKeyWindow else { return }
+        // A non-activating panel can become key without activating its input
+        // context. Window key status alone is not enough for IME input.
+        let inputContext = focusedSurface.inputContext
+        if window.firstResponder === focusedSurface {
+            if NSTextInputContext.current !== inputContext {
+                inputContext?.activate()
+            }
+            inputContext?.invalidateCharacterCoordinates()
+        }
+
+        // If the complete input focus state is ready then we're done.
+        guard !window.isKeyWindow ||
+                window.firstResponder !== focusedSurface ||
+                NSTextInputContext.current !== inputContext else { return }
 
         // If we don't have retries then we're done
         guard retries > 0 else { return }
