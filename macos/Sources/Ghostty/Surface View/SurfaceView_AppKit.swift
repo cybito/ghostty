@@ -834,9 +834,14 @@ extension Ghostty {
         override func resignFirstResponder() -> Bool {
             let result = super.resignFirstResponder()
 
-            // We sometimes call this manually (see SplitView) as a way to force us to
-            // yield our focus state.
-            if result { focusDidChange(false) }
+            // Cancel any unfinished IME composition when this surface loses
+            // focus. Otherwise the preedit remains rendered in this surface
+            // while the input context moves to the new first responder.
+            if result {
+                unmarkText()
+                inputContext?.deactivate()
+                focusDidChange(false)
+            }
 
             return result
         }
