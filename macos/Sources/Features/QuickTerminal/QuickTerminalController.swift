@@ -155,9 +155,15 @@ class QuickTerminalController: BaseTerminalController {
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
 
-        // If we're not visible we don't care to run the logic below. It only
-        // applies if we can be seen.
-        guard visible else { return }
+        // A quick terminal is a non-activating panel. When it is activated by
+        // clicking it while another Ghostty window is focused, AppKit can make
+        // the panel key without switching NSTextInputContext.current. Re-run
+        // the same focus handoff used after showing the panel so IME candidates
+        // belong to the clicked quick-terminal surface.
+        guard visible, let window else { return }
+        DispatchQueue.main.async {
+            self.makeWindowKey(window, retries: 10)
+        }
 
         // Re-hide the dock if we were hiding it before.
         hiddenDock?.hide()
