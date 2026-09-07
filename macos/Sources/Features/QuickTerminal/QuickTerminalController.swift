@@ -553,8 +553,11 @@ class QuickTerminalController: BaseTerminalController {
         let inputContext = focusedSurface.inputContext
         if let currentInputContext = NSTextInputContext.current,
            currentInputContext !== inputContext {
+            currentInputContext.client.unmarkText()
+            currentInputContext.discardMarkedText()
             currentInputContext.deactivate()
         }
+        inputContext?.discardMarkedText()
         inputContext?.activate()
         inputContext?.invalidateCharacterCoordinates()
 
