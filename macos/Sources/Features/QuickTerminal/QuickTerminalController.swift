@@ -536,18 +536,28 @@ class QuickTerminalController: BaseTerminalController {
         // The window must become top-level
         window.makeKeyAndOrderFront(nil)
 
-        // The view must gain our keyboard focus
-        window.makeFirstResponder(focusedSurface)
+        // The view must gain our keyboard focus.
+        guard window.makeFirstResponder(focusedSurface) else {
+            if retries > 0 {
+                DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(25)) {
+                    self.makeWindowKey(window, retries: retries - 1)
+                }
+            }
+            return
+        }
 
         // A non-activating panel can become key without activating its input
-        // context. Window key status alone is not enough for IME input.
+        // context. Window key status alone is not enough for IME input. Stop
+        // the previous context first so an unfinished composition cannot
+        // survive the focus handoff and leave a candidate window behind.
         let inputContext = focusedSurface.inputContext
-        if window.firstResponder === focusedSurface {
-            if NSTextInputContext.current !== inputContext {
-                inputContext?.activate()
-            }
-            inputContext?.invalidateCharacterCoordinates()
+        if let currentInputContext = NSTextInputContext.current,
+           currentInputContext !== inputContext {
+            currentInputContext.deactivate()
         }
+        inputContext?.activate()
+        inputContext?.invalidateCharacterCoordinates()
+
 
         // If the complete input focus state is ready then we're done.
         guard !window.isKeyWindow ||
