@@ -834,12 +834,19 @@ extension Ghostty {
         override func resignFirstResponder() -> Bool {
             let result = super.resignFirstResponder()
 
-            // Cancel any unfinished IME composition when this surface loses
-            // focus. Otherwise the preedit remains rendered in this surface
-            // while the input context moves to the new first responder.
+            // We sometimes call this manually (see SplitView) as a way to force us to
+            // yield our focus state. Cancel any unfinished IME composition so the
+            // preedit doesn't remain rendered in this surface while the input
+            // context moves to the new first responder.
+            //
+            // We deliberately do not touch the input context itself: AppKit owns
+            // the activation lifecycle and activates the context of the new first
+            // responder for us. Deactivating a context the input method is still
+            // bound to leaves the input method driving a dead client, which shows
+            // up as candidates drawn in the corner of the screen and committed
+            // text that never appears.
             if result {
                 unmarkText()
-                inputContext?.deactivate()
                 focusDidChange(false)
             }
 

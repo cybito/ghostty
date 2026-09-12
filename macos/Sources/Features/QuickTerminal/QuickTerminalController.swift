@@ -155,11 +155,10 @@ class QuickTerminalController: BaseTerminalController {
     override func windowDidBecomeKey(_ notification: Notification) {
         super.windowDidBecomeKey(notification)
 
-        // A quick terminal is a non-activating panel. When it is activated by
-        // clicking it while another Ghostty window is focused, AppKit can make
-        // the panel key without switching NSTextInputContext.current. Re-run
-        // the same focus handoff used after showing the panel so IME candidates
-        // belong to the clicked quick-terminal surface.
+        // A quick terminal is a non-activating panel: clicking it can make it
+        // key while our app is only active and not frontmost. Re-run the focus
+        // handoff used after showing the panel so the input context (and thus
+        // the input method's client) belongs to the clicked surface.
         guard visible, let window else { return }
         DispatchQueue.main.async {
             self.makeWindowKey(window, retries: 10)
@@ -500,8 +499,11 @@ class QuickTerminalController: BaseTerminalController {
 
                 // If our application is not active, then we grab focus. Its important
                 // we do this AFTER our window is animated in and focused because
-                // otherwise macOS will bring forward another window.
-                if !NSApp.isActive {
+                // otherwise macOS will bring forward another window. We also do
+                // this when we're active but not frontmost: a non-activating panel
+                // can become key in that state, and the input method only binds to
+                // us when we're frontmost.
+                if !NSApp.isFrontmost {
                     NSApp.activate(ignoringOtherApps: true)
 
                     // This works around a really funky bug where if the terminal is
@@ -536,7 +538,13 @@ class QuickTerminalController: BaseTerminalController {
         // The window must become top-level
         window.makeKeyAndOrderFront(nil)
 
-        // The view must gain our keyboard focus.
+        // The view must gain our keyboard focus. AppKit activates the input
+        // context for us as part of the first responder handoff (which is what
+        // lets input methods bind to this surface), so we intentionally leave
+        // the input context lifecycle to AppKit. Manually deactivating or
+        // activating contexts leaves the input method bound to a context that
+        // is no longer current, and then candidates are drawn in the corner of
+        // the screen and committed text is silently dropped.
         guard window.makeFirstResponder(focusedSurface) else {
             if retries > 0 {
                 DispatchQueue.main.asyncAfter(deadline: .now() + .milliseconds(25)) {
@@ -546,26 +554,23 @@ class QuickTerminalController: BaseTerminalController {
             return
         }
 
-        // A non-activating panel can become key without activating its input
-        // context. Window key status alone is not enough for IME input. Stop
-        // the previous context first so an unfinished composition cannot
-        // survive the focus handoff and leave a candidate window behind.
-        let inputContext = focusedSurface.inputContext
-        if let currentInputContext = NSTextInputContext.current,
-           currentInputContext !== inputContext {
-            currentInputContext.client.unmarkText()
-            currentInputContext.discardMarkedText()
-            currentInputContext.deactivate()
+        // A non-activating panel can become key while our app is merely active
+        // and not frontmost (see `NSApplication.isFrontmost`). AppKit keeps its
+        // input context for the key window of the frontmost app, so in that
+        // state the input method has no client for our surface at all. Ask to
+        // be frontmost; once that lands, AppKit re-activates the input context
+        // for the first responder we just set.
+        if !NSApp.isFrontmost {
+            NSApp.activate(ignoringOtherApps: true)
         }
-        inputContext?.discardMarkedText()
-        inputContext?.activate()
-        inputContext?.invalidateCharacterCoordinates()
 
+        // Our surface may have become focused a full frame after the input
+        // method last asked us where the caret is, so tell it to ask again.
+        focusedSurface.inputContext?.invalidateCharacterCoordinates()
 
         // If the complete input focus state is ready then we're done.
         guard !window.isKeyWindow ||
-                window.firstResponder !== focusedSurface ||
-                NSTextInputContext.current !== inputContext else { return }
+                window.firstResponder !== focusedSurface else { return }
 
         // If we don't have retries then we're done
         guard retries > 0 else { return }
