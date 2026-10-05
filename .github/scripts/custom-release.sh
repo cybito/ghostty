@@ -124,6 +124,10 @@ else: tools.update(blueprint=v('blueprint-compiler', '--version'), cc=v('cc', '-
 PY
 }
 
+has_arch() {
+  [[ " $1 " == *" $2 "* ]]
+}
+
 smoke() {
   local runner_temp="${RUNNER_TEMP:?}"
   local platform="$1" tag="$2" directory="$3" fixture="$runner_temp/ghostty-fixture" diag="${GHOSTTY_SMOKE_DIAG:-$runner_temp/ghostty-smoke}" binary
@@ -134,7 +138,8 @@ smoke() {
     local mount="$fixture/mount"; mkdir -p "$mount"; hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$directory/ghostty-$tag-darwin-arm64.dmg"; trap 'hdiutil detach "$mount" || true' EXIT
     "$mount/install.sh" --prefix "$fixture/prefix"; "$mount/install.sh" --prefix "$fixture/prefix"
     binary="$fixture/prefix/share/applications/Ghostty.app/Contents/MacOS/ghostty"
-    codesign --verify --deep --strict "$fixture/prefix/share/applications/Ghostty.app"; lipo -archs "$binary" | grep -qx arm64
+    codesign --verify --deep --strict "$fixture/prefix/share/applications/Ghostty.app"
+    local architectures; architectures=$(lipo -archs "$binary"); has_arch "$architectures" arm64
   else
     tar -xzf "$directory/ghostty-$tag-linux-arm64.tar.gz" -C "$fixture"
     "$fixture/ghostty-$tag-linux-arm64/install.sh" --prefix "$fixture/prefix"; "$fixture/ghostty-$tag-linux-arm64/install.sh" --prefix "$fixture/prefix"
@@ -223,6 +228,9 @@ PY
 
 regressions() {
   export RELEASE_SCRIPT="$PWD/.github/scripts/custom-release.sh" RELEASE_HELPER="$helper"
+  has_arch arm64 arm64 || { echo 'single-architecture binary rejected' >&2; return 1; }
+  has_arch 'x86_64 arm64' arm64 || { echo 'universal binary arm64 slice rejected' >&2; return 1; }
+  if has_arch 'x86_64 arm64e' arm64; then echo 'arm64e must not match arm64' >&2; return 1; fi
   python3 - <<'PY'
 import json, os, pathlib, runpy, shutil, subprocess, tempfile
 from argparse import Namespace

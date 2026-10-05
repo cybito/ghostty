@@ -11,7 +11,7 @@ Only a published GitHub Release in `cybito/ghostty` starts `custom-release.yml`.
 Pushes (including tag pushes) do not publish. Use `v<base>-custom.<positive integer>`
 and point the release at the exact pushed `custom` commit. The version base must
 match `build.zig.zon` (currently `1.3.2`; this migration's first fully validated
-asset release uses `v1.3.2-custom.4`). Existing tags/releases are never moved.
+asset release uses `v1.3.2-custom.5`). Existing tags/releases are never moved.
 Both regular custom releases and prereleases are supported.
 
 Validation dereferences the tag to a commit and checks its ancestry against
@@ -61,7 +61,7 @@ assets without changing existing assets.
 Download all files for a platform into an empty directory using GitHub CLI:
 
 ```sh
-tag=v1.3.2-custom.4
+tag=v1.3.2-custom.5
 platform=linux # use darwin for macOS ARM64
 mkdir -p /absolute/empty/download
 cd /absolute/empty/download
@@ -137,10 +137,10 @@ assets and are not included in the package receipt.
 ## Maintainer entry points
 
 ```sh
-bash .github/scripts/custom-release.sh build darwin v1.3.2-custom.4 <40-char-source-sha> /absolute/build-output
-python3 .github/scripts/package-release.py check --tag v1.3.2-custom.4 --commit <sha> --platform darwin --output-dir /absolute/empty/check
-python3 .github/scripts/package-release.py pack --tag v1.3.2-custom.4 --commit <sha> --platform darwin --input-dir /absolute/build-output --output-dir /absolute/empty/package
-python3 .github/scripts/package-release.py publish --tag v1.3.2-custom.4 --commit <sha> --platform darwin --directory /absolute/package
+bash .github/scripts/custom-release.sh build darwin v1.3.2-custom.5 <40-char-source-sha> /absolute/build-output
+python3 .github/scripts/package-release.py check --tag v1.3.2-custom.5 --commit <sha> --platform darwin --output-dir /absolute/empty/check
+python3 .github/scripts/package-release.py pack --tag v1.3.2-custom.5 --commit <sha> --platform darwin --input-dir /absolute/build-output --output-dir /absolute/empty/package
+python3 .github/scripts/package-release.py publish --tag v1.3.2-custom.5 --commit <sha> --platform darwin --directory /absolute/package
 ```
 
 `check`, `pack`, and `publish` emit JSON describing verified assets, output
