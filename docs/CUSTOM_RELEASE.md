@@ -1,9 +1,8 @@
 # Custom release provenance
 
 - GitHub fork: `https://github.com/cybito/ghostty` (upstream: `https://github.com/ghostty-org/ghostty.git`). `custom` is the custom build and release source.
-- Historical Forgejo source repository: none; `cybit/ghostty` is created solely as the associated artifact repository. No historical Forgejo package or digest exists.
-- The GitHub fork preserves custom source history; `custom` is the release source branch.
-- Custom DMG installs are stored as OCI package `ias-ghostty`; immutable download: `oras pull git.cybit.top/cybit/ias-ghostty@sha256:<digest>`.
+- Historical Forgejo source repository: none; `cybit/ghostty` was created solely as an associated artifact repository. No historical Forgejo package or digest exists.
+- Custom DMG and Linux ARM64 installation archive are GitHub Release assets. No Forgejo registry, package token, or PAT is used by current builds.
 - macOS app uses ad-hoc signing without notarization; Gatekeeper may require manual approval.
 
 ## Release contract
@@ -11,101 +10,100 @@
 Only a published GitHub Release in `cybito/ghostty` starts `custom-release.yml`.
 Pushes (including tag pushes) do not publish. Use `v<base>-custom.<positive integer>`
 and point the release at the exact pushed `custom` commit. The version base must
-match `build.zig.zon` (currently `1.3.2`, so the first planned tag is
-`v1.3.2-custom.1`). An existing release/tag is never repointed; choose the next
-unused custom integer. Both regular releases and prereleases are supported.
+match `build.zig.zon` (currently `1.3.2`; this migration's first asset-bearing
+release uses `v1.3.2-custom.2`). Existing tags/releases are never moved.
+Both regular custom releases and prereleases are supported.
 
 Validation dereferences the tag to a commit and checks its ancestry against
 `origin/custom`, not merely the release's `target_commitish`. Both native builds
-check out that same SHA, even if `custom` advances during the run. GitHub Release
-assets must stay empty. The notes job preserves the user's notes and updates only
-the `<!-- custom-builds:start -->` / `<!-- custom-builds:end -->` section after
-both platforms are published and anonymously verified.
+check out that same SHA, even if `custom` advances during the run. The workflow
+preserves user-authored release notes and updates only the managed
+`<!-- custom-builds:start -->` / `<!-- custom-builds:end -->` block after both
+platforms' assets have been independently read back and validated.
 
 | Platform | Hosted runner | Build |
 | --- | --- | --- |
 | macOS ARM64 | `macos-26` | Zig 0.16.0; Xcode 26.6; Nushell 0.116.1; ReleaseLocal |
 | Omarchy ARM64 | `ubuntu-26.04-arm` | Zig 0.16.0; native baseline CPU; complete `bin/share` prefix |
 
-ORAS is pinned to 1.3.3. Every downloaded tool is checked against the checksum
-pinned in the workflow **and** its official release checksum/metadata. Toolchains
-in `release.json` are the actual versions used. There are no GitHub build
-artifacts, caches, GHCR images, or Release attachments, and no source push mirror
-to Forgejo. Disable all inherited upstream workflows externally; keep only this
-workflow enabled. This file does not claim that provisioning has been performed.
+Every downloaded tool is checked against the checksum pinned in the workflow
+and official release checksum/metadata. Toolchains in `release.json` are the
+actual versions used. Smoke diagnostics are uploaded using the pinned
+`actions/upload-artifact` action and retained for 7 days. There are no Forgejo
+publication dependencies. Disable inherited upstream workflows externally;
+keep only this workflow enabled. This file does not claim that provisioning has
+been performed.
 
-## Forgejo storage and credentials
+## Assets and collision policy
 
-The owner-level OCI package is `git.cybit.top/cybit/ias-ghostty`; associate it with
-`cybit/ghostty` in Forgejo's package settings. GitHub source annotations remain
-`https://github.com/cybito/ghostty.git`; association must not falsify provenance.
-Ghostty had no historical native OCI artifact. The original four CLI packages'
-`application/vnd.ias.native.v1` versions are not affected by this workflow.
+Each platform contributes uniquely prefixed assets:
 
-Installation artifacts use `application/vnd.cybito.install-package.v1` and tags
-`<release-tag>-darwin-arm64` / `<release-tag>-linux-arm64`. Layers are the DMG or
-gzip archive, `release.json`, and `SHA256SUMS`, with explicit media types. The
-receipt has schema 1, project/source SHA/release/platform/architecture, actual
-toolchain strings, and each payload's name/hash/size. It is outside the archive,
-avoiding recursive hashes. SHA256SUMS includes the receipt and package.
-Manifest creation time is the source commit's UTC time.
+`<release-tag>-<platform>-<original-package-filename>`
 
-Use a new human-created Forgejo PAT named `github-custom-builds`, username
-`cybit`, with package-write permission (prefer public-only). Package scope is
-owner-wide: it is **not** limited to these six packages. Never export existing
-OAuth credentials, Docker helpers, or passwords. Provision GitHub environment
-`forgejo-registry`, tag-only deployment policy `v*-custom.*`, and environment
-secret `FORGEJO_REGISTRY_TOKEN`. No approval gate is needed per subsequent release.
-Only the post-smoke upload step receives this token; mode-0700/mode-0600 temporary
-auth is removed even on failure. The notes job has no Forgejo write credential.
-Provisioning, initial real release, and credential scope verification remain
-operator actions, not something demonstrated by adding these files.
+This covers the original payload archive/DMG, `release.json`, and `SHA256SUMS`.
+The receipt has schema 1, project/source SHA/release/platform/architecture,
+actual toolchain strings, and each payload's name/hash/size. It is outside the
+archive, avoiding recursive hashes. SHA256SUMS includes the receipt and package.
 
-Before building, `check` resolves and verifies the complete existing artifact by
-digest. Only explicit `manifest_unknown` / `name_unknown` means absent; auth,
-network, TLS, or identity mismatches fail closed. Reruns reuse the exact verified
-identity without rebuilding. Publishing first builds a local OCI layout,
-determines its digest, copies it to Forgejo, then checks manifest bytes, every
-descriptor, an independent pull and SHA256SUMS. Different published bytes are
-never silently overwritten. A failed platform does not remove the successful
-other platform; rerunning fills the missing platform.
+Before compiling, the workflow checks `gh release view --json assets` and
+reads back matching assets with `gh release download`. A complete existing
+platform is reused only after source/tag/platform, receipt, hashes, and payload
+validation. A partial set is reconciled by downloading its existing assets,
+validating their bytes, and uploading only absent names. Mismatching existing
+bytes fail closed. Uploads use `gh release upload` without `--clobber`; distinct
+names are never overwritten. The helper enforces GitHub's 1000 assets/release
+and less-than-2-GiB per-file limits before upload. After upload, all platform
+files are independently downloaded and validated again. Reruns resume missing
+assets without changing existing assets.
 
 ## Download and install
 
-Copy the immutable references from the successful release notes/job summary:
+Download all files for a platform into an empty directory using GitHub CLI:
 
 ```sh
-mkdir ghostty-download && cd ghostty-download
-oras pull git.cybit.top/cybit/ias-ghostty@sha256:<digest>
-shasum -a 256 -c SHA256SUMS
+tag=v1.3.2-custom.2
+platform=linux # use darwin for macOS ARM64
+mkdir -p /absolute/empty/download
+cd /absolute/empty/download
+gh release download "$tag" --repo cybito/ghostty --pattern "$tag-$platform-*"
+prefix="$tag-$platform-"
+for file in "$prefix"*; do mv "$file" "${file#"$prefix"}"; done
+if [ "$platform" = linux ]; then sha256sum -c SHA256SUMS; else shasum -a 256 -c SHA256SUMS; fi
 ```
 
-For descriptor, source-identity, and independent-pull validation, use this
-checkout's helper rather than trusting only a mutable tag:
+The helper first compares the expected platform set with release assets. No
+matching assets means missing; incomplete sets are reported partial, and all
+existing files are downloaded and validated before reuse or reconciliation.
+Each asset filename adds `<tag>-<platform>-` before its original package name.
+After restoring original names, extract and install Linux with:
 
 ```sh
-python3 .github/scripts/package-release.py verify \
-  --reference git.cybit.top/cybit/ias-ghostty@sha256:<digest> \
-  --output-dir /absolute/empty/verification-directory
+tar -xzf "ghostty-$tag-linux-arm64.tar.gz"
+cd "ghostty-$tag-linux-arm64"
+./install.sh --prefix /absolute/prefix
 ```
 
-On Linux, extract `ghostty-<release-tag>-linux-arm64.tar.gz`, enter the package
-directory, and run `./install.sh --prefix /absolute/prefix`. The installer needs
-Python 3 and copies the full `bin/share` tree: terminal executable, terminfo,
-shell integration, GTK resources, desktop files, and icons. Put
-`<prefix>/bin` on PATH and `<prefix>/share` on XDG_DATA_DIRS as appropriate.
-It does not install distribution dependencies: Omarchy needs the native GTK4,
+The installer needs Python 3 and copies the full `bin/share` tree: terminal
+executable, terminfo, shell integration, GTK resources, desktop files, and icons.
+Put `<prefix>/bin` on PATH and `<prefix>/share` on XDG_DATA_DIRS as appropriate.
+It does not install distribution dependencies: Omarchy needs native GTK4,
 libadwaita, gtk4-layer-shell, oniguruma, and bzip2 runtime libraries.
 
-On macOS, mount `ghostty-<release-tag>-darwin-arm64.dmg` read-only. It contains
-`Ghostty.app`, the conventional Applications link, license/README, and
-`install.sh`. Drag the app to Applications manually, or use the explicit-prefix
-installer from the mounted volume. The installer places it at
+On macOS, mount the original DMG read-only and run its explicit-prefix installer:
+
+```sh
+hdiutil attach "ghostty-$tag-darwin-arm64.dmg" -readonly -nobrowse -mountpoint /tmp/ghostty
+/tmp/ghostty/install.sh --prefix /absolute/prefix
+hdiutil detach /tmp/ghostty
+```
+
+It contains `Ghostty.app`, the conventional Applications link, license/README,
+and `install.sh`. The installer places the app at
 `<prefix>/share/applications/Ghostty.app` and a relative CLI symlink at
 `<prefix>/bin/ghostty`. It never copies to system Applications automatically.
-Launch with `open -na /absolute/prefix/share/applications/Ghostty.app`.
-The app is ad-hoc signed, **not** Apple Developer signed/notarized; Gatekeeper
-may require manual approval. Do not describe this as an official signed product.
+Launch with `open -na /absolute/prefix/share/applications/Ghostty.app`. The app
+is ad-hoc signed, **not** Apple Developer signed/notarized; Gatekeeper may
+require manual approval. Do not describe this as an official signed product.
 
 Both installers default to `$HOME/.local`, accept only an absolute `--prefix`,
 preflight conflicts before copying, reject differing existing files/symlinks,
@@ -118,8 +116,8 @@ operator-managed replacement; there is no destructive force flag.
 
 The workflow mounts/extracts the actual package into an isolated fixture,
 installs it twice, checks version/Zig/ARM64, and validates signing on macOS or
-`ldd`/desktop entries on Linux. It reads the newly built native `--help` and config
-documentation before using terminal-launch arguments.
+`ldd`/desktop entries on Linux. It reads the newly built native `--help` and
+config documentation before using terminal-launch arguments.
 
 Linux uses X11 under `dbus-run-session` and `xvfb-run`, with Mesa software
 rendering; a shell prints `custom-ci-ok`, the window title is checked with
@@ -130,36 +128,34 @@ the visible Ghostty window/title, captures that window, and Vision OCR confirms
 the marker. Missing GUI/session/screenshot permission or missing OCR evidence
 fails smoke, rather than claiming success from `+version`.
 
-Screenshot and logs are separate OCI diagnostics
-`<release-tag>-<platform>-arm64-smoke`, artifact type
-`application/vnd.cybito.smoke-diagnostics.v1`, in the same package. The immutable
-diagnostics digest appears in the job summary and can be pulled with ORAS.
-Diagnostics are uploaded after a smoke attempt even when it fails; installation
-packages are published only after successful smoke. Diagnostics do not appear
-in installation receipts or GitHub assets.
+Smoke diagnostics are uploaded as a separate GitHub Actions artifact named
+`<release-tag>-<platform>-arm64-smoke`, retained for 7 days. The upload step runs
+with `if: always()` after smoke attempts, so diagnostic files are preserved when
+smoke fails where files were produced. Diagnostics are not product release
+assets and are not included in the package receipt.
 
 ## Maintainer entry points
 
 ```sh
-bash .github/scripts/custom-release.sh build darwin v1.3.2-custom.1 <40-char-source-sha> /absolute/build-output
-python3 .github/scripts/package-release.py check --tag v1.3.2-custom.1 --commit <sha> --platform darwin --output-dir /absolute/empty/check
-python3 .github/scripts/package-release.py pack --tag v1.3.2-custom.1 --commit <sha> --platform darwin --input-dir /absolute/build-output --output-dir /absolute/empty/package
-python3 .github/scripts/package-release.py publish --directory /absolute/package --registry-config /absolute/private-auth.json
+bash .github/scripts/custom-release.sh build darwin v1.3.2-custom.2 <40-char-source-sha> /absolute/build-output
+python3 .github/scripts/package-release.py check --tag v1.3.2-custom.2 --commit <sha> --platform darwin --output-dir /absolute/empty/check
+python3 .github/scripts/package-release.py pack --tag v1.3.2-custom.2 --commit <sha> --platform darwin --input-dir /absolute/build-output --output-dir /absolute/empty/package
+python3 .github/scripts/package-release.py publish --tag v1.3.2-custom.2 --commit <sha> --platform darwin --directory /absolute/package
 ```
 
-`check`, `pack`, and `publish` emit JSON (`exists/reference`, `directory`, and
-`reference/digest` respectively); `verify` emits the validated receipt. All
-projects, owners, and package names are fixed in the helper, not caller options.
-Use `linux` for the Linux equivalents. Do not run upstream release/update
-scripts: some merge source, install locally, or upload elsewhere.
+`check`, `pack`, and `publish` emit JSON describing verified assets, output
+directory, and uploaded assets. The helper uses `GH_TOKEN` for the repository's
+GitHub Release only; the workflow uses the built-in token and `contents: write`
+where publishing or release-note updates occur. It never accesses Forgejo or
+requires a PAT. Project, repository, and owner are fixed in the helper, not
+caller options. Use `linux` for Linux equivalents. Do not run upstream
+release/update scripts: some merge source, install locally, or upload elsewhere.
 
-Maintainer boundary checks, also invoked by the release validation job:
-`bash .github/scripts/custom-release.sh regressions`. They create an isolated
-Git/event fixture and cover custom ancestry, unrelated upstream commits,
-non-custom and malicious tags, missing-vs-auth/network registry errors,
-wrong-source receipts, and rejection of conflicting published identities.
-The release validation job runs the boundary and installer regressions
-automatically; `bash .github/scripts/custom-release.sh regressions` also passed
-locally, as did Python, Bash, and YAML syntax checks. The local regression run
-does not prove hosted builds, native GUI launches, external package publication,
-or immutable pull verification; those must be observed before claiming delivery.
+Maintainer boundary checks, also invoked by release validation:
+`bash .github/scripts/custom-release.sh regressions`. They create isolated Git,
+event, and asset fixtures and cover custom ancestry, unrelated upstream commits,
+non-custom and malicious tags, installer conflict handling, missing/full/partial
+asset sets, mismatching bytes, source identity and checksum validation, and
+no-overwrite behavior. Tests are not run as part of this change; hosted builds,
+native GUI launches, upload, and immutable download verification must be
+observed before claiming delivery.

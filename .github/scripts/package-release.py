@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Ghostty install-package OCI contract. Registry targets cannot be overridden."""
+"""Ghostty GitHub Release asset contract."""
 import argparse
 import hashlib
 import json
@@ -14,12 +14,11 @@ import tempfile
 
 PROJECT = 'ghostty'
 SOURCE = 'https://github.com/cybito/ghostty.git'
-PACKAGE = 'git.cybit.top/cybit/ias-ghostty'
-TYPE = 'application/vnd.cybito.install-package.v1'
 TAG = re.compile(r'v[0-9]+\.[0-9]+\.[0-9]+-custom\.[1-9][0-9]*\Z')
 SHA = re.compile(r'[0-9a-f]{40}\Z')
-DIGEST = re.compile(r'sha256:[0-9a-f]{64}\Z')
 FIELDS = {'schema', 'project', 'source_repo', 'source_commit', 'release_tag', 'platform', 'architecture', 'toolchains', 'files'}
+MAX_ASSETS = 1000
+MAX_ASSET_SIZE = 2 * 1024**3
 
 
 def require(ok, message):
@@ -49,6 +48,17 @@ def sha(path):
     return h.hexdigest()
 
 
+def asset_name(tag, platform, filename):
+    require(TAG.fullmatch(tag) and platform in ('darwin', 'linux'), 'invalid asset identity')
+    require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', filename), 'unsafe asset filename')
+    return f'{tag}-{platform}-{filename}'
+
+
+def release_assets(tag):
+    raw = run(['gh', 'release', 'view', tag, '--repo', 'cybito/ghostty', '--json', 'assets'])
+    return json.loads(raw)['assets']
+
+
 def identity(tag, commit, platform):
     require(TAG.fullmatch(tag) and SHA.fullmatch(commit), 'invalid tag or source SHA')
     require(platform in ('darwin', 'linux'), 'invalid platform')
@@ -58,7 +68,6 @@ def identity(tag, commit, platform):
 
 def validate_receipt(receipt, directory):
     require(set(receipt) == FIELDS, 'unexpected release.json fields')
-    require(type(receipt['schema']) is int and receipt['schema'] == 1, 'invalid schema')
     expected = identity(receipt['release_tag'], receipt['source_commit'], receipt['platform'])
     require(all(receipt[k] == v for k, v in expected.items()), 'release identity mismatch')
     require(isinstance(receipt['toolchains'], dict) and receipt['toolchains'] and
@@ -68,21 +77,18 @@ def validate_receipt(receipt, directory):
     for item in receipt['files']:
         require(set(item) == {'name', 'sha256', 'size'}, 'invalid file record')
         name = item['name']
-        require(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) and name not in names and
-                name not in ('release.json', 'SHA256SUMS'), 'unsafe or duplicate filename')
+        require(isinstance(name, str) and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) and name not in names and name not in ('release.json', 'SHA256SUMS'), 'unsafe or duplicate filename')
         names.add(name)
         path = directory / name
         require(path.is_file() and not path.is_symlink(), 'missing regular payload file')
         require(type(item['size']) is int and path.stat().st_size == item['size'] and sha(path) == item['sha256'], 'payload hash/size mismatch')
     expected_name = f"ghostty-{receipt['release_tag']}-{receipt['platform']}-arm64.{'dmg' if receipt['platform'] == 'darwin' else 'tar.gz'}"
     require(names == {expected_name}, 'unexpected Ghostty payload set')
-    checksums = ''.join(f"{sha(directory / name)}  {name}\n" for name in sorted(names | {'release.json'}))
+    checksums = ''.join(f'{sha(directory / name)}  {name}\n' for name in sorted(names | {'release.json'}))
     require((directory / 'SHA256SUMS').read_text() == checksums, 'SHA256SUMS mismatch')
     return names | {'release.json', 'SHA256SUMS'}
 
 
-# A two-pass installer refuses all conflicts before copying anything. No config,
-# service, package manager, or system Applications directory is touched.
 INSTALLER = '''#!/bin/sh
 set -eu
 prefix="${HOME}/.local"
@@ -158,112 +164,73 @@ def pack(args):
     return {'directory': str(out)}
 
 
-def media(name):
-    if name == 'release.json': return 'application/json'
-    if name == 'SHA256SUMS': return 'text/plain'
-    if name.endswith('.tar.gz'): return 'application/gzip'
-    return 'application/octet-stream'
-
-
-def fetch_manifest(reference, config):
-    return run(['oras', 'manifest', 'fetch', '--registry-config', str(config), reference])
-
-
-def verify(reference, out, config):
-    require(reference.startswith(PACKAGE + '@') and DIGEST.fullmatch(reference.split('@')[-1]), 'verification requires this package digest reference')
-    require(not out.exists() or not any(out.iterdir()), 'verification output must be empty')
-    out.mkdir(parents=True, exist_ok=True)
-    raw = fetch_manifest(reference, config)
-    require('sha256:' + hashlib.sha256(raw).hexdigest() == reference.split('@')[1], 'manifest byte digest mismatch')
-    manifest = json.loads(raw)
-    require(manifest.get('schemaVersion') == 2 and manifest.get('artifactType') == TYPE, 'wrong artifact type')
-    layers = manifest.get('layers', [])
-    names = set()
-    with tempfile.TemporaryDirectory() as temp:
-        for descriptor in [manifest['config'], *layers]:
-            digest = descriptor['digest']
-            require(DIGEST.fullmatch(digest), 'invalid descriptor digest')
-            blob = Path(temp) / digest.split(':')[1]
-            run(['oras', 'blob', 'fetch', '--registry-config', str(config), '--output', str(blob), PACKAGE + '@' + digest])
-            require(blob.stat().st_size == descriptor['size'] and 'sha256:' + sha(blob) == digest, 'OCI blob mismatch')
-            if descriptor in layers:
-                name = descriptor.get('annotations', {}).get('org.opencontainers.image.title', '')
-                require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]*', name) and name not in names, 'unsafe layer title')
-                require(descriptor['mediaType'] == media(name), 'incorrect layer media type')
-                names.add(name)
-        run(['oras', 'pull', '--registry-config', str(config), '--output', str(out), reference])
-    receipt = json.loads((out / 'release.json').read_text())
-    expected = validate_receipt(receipt, out)
-    require(names == expected and {p.name for p in out.iterdir()} == expected, 'unexpected OCI layers or pulled files')
-    for descriptor in layers:
-        path = out / descriptor['annotations']['org.opencontainers.image.title']
-        require('sha256:' + sha(path) == descriptor['digest'] and path.stat().st_size == descriptor['size'], 'independent pull mismatch')
-    annotations = manifest.get('annotations', {})
-    require(annotations.get('org.opencontainers.image.source') == SOURCE and
-            annotations.get('org.opencontainers.image.revision') == receipt['source_commit'] and
-            annotations.get('org.opencontainers.image.version') == receipt['release_tag'], 'source annotations mismatch')
-    return receipt
-
-
-def existing(tag, commit, platform, out, config):
+def verify(directory, tag, commit, platform):
+    receipt = json.loads((directory / 'release.json').read_text())
     expected = identity(tag, commit, platform)
-    reference = f'{PACKAGE}:{tag}-{platform}-arm64'
-    result = subprocess.run(['oras', 'manifest', 'fetch', '--registry-config', str(config), reference], capture_output=True)
-    if result.returncode:
-        error = result.stderr.decode(errors='replace')
-        missing = re.search(r'\b(?:MANIFEST_UNKNOWN|NAME_UNKNOWN|manifest_unknown|name_unknown)\b', error)
-        require(missing and not re.search(r'(?i)unauthorized|denied|timeout|tls|connection', error), error)
+    require(all(receipt.get(k) == v for k, v in expected.items()), 'asset receipt identity mismatch')
+    names = validate_receipt(receipt, directory)
+    require(all((directory / n).stat().st_size < MAX_ASSET_SIZE for n in names), 'GitHub per-file limit exceeded')
+    return receipt, names
+
+
+def check(args):
+    identity(args.tag, args.commit, args.platform)
+    directory = absolute(args.output_dir)
+    require(not directory.exists() or not any(directory.iterdir()), 'output must be empty')
+    directory.mkdir(parents=True, exist_ok=True)
+    assets = release_assets(args.tag)
+    originals = ('release.json', 'SHA256SUMS', f"ghostty-{args.tag}-{args.platform}-arm64.{'dmg' if args.platform == 'darwin' else 'tar.gz'}")
+    expected = {asset_name(args.tag, args.platform, n): n for n in originals}
+    present = {a['name']: a for a in assets}
+    prefixes = [a['name'] for a in assets if a['name'].startswith(f'{args.tag}-{args.platform}-')]
+    require(all(name in expected for name in prefixes), 'unexpected asset under platform release prefix')
+    matched = [name for name in expected if name in present]
+    if len(matched) == 0:
         return {'exists': False}
-    digest = 'sha256:' + hashlib.sha256(result.stdout).hexdigest()
-    immutable = PACKAGE + '@' + digest
-    receipt = verify(immutable, out, config)
-    require(all(receipt[k] == v for k, v in expected.items()), 'existing tag belongs to a different release identity')
-    return {'exists': True, 'reference': immutable}
+    with tempfile.TemporaryDirectory() as temp:
+        download = Path(temp)
+        run(['gh', 'release', 'download', args.tag, '--repo', 'cybito/ghostty', '--dir', str(download), *sum((['--pattern', n] for n in matched), [])])
+        for unique in matched:
+            local = download / unique
+            require(local.is_file() and not local.is_symlink(), 'missing downloaded release asset')
+            published = present[unique]
+            require(local.stat().st_size == published['size'], 'release asset size metadata mismatch')
+            shutil.copy2(local, directory / expected[unique])
+    if len(matched) != len(expected):
+        return {'exists': False, 'partial': True}
+    receipt, names = verify(directory, args.tag, args.commit, args.platform)
+    require(set(directory.iterdir()) == {directory / n for n in originals}, 'unexpected file in downloaded platform assets')
+    return {'exists': True, 'assets': list(expected), 'receipt': receipt}
 
 
 def publish(args):
-    directory, config = absolute(args.directory), absolute(args.registry_config)
-    receipt = json.loads((directory / 'release.json').read_text())
-    names = validate_receipt(receipt, directory)
+    directory = absolute(args.directory)
+    receipt, names = verify(directory, args.tag, args.commit, args.platform)
+    assets = release_assets(args.tag)
+    require(len(assets) <= MAX_ASSETS, 'GitHub release asset limit exceeded')
+    expected = {asset_name(args.tag, args.platform, n): n for n in names}
+    existing = {a['name']: a for a in assets}
+    require(len(existing) + len([n for n in expected if n not in existing]) <= MAX_ASSETS, 'GitHub release asset limit exceeded')
     with tempfile.TemporaryDirectory() as temp:
-        prior = existing(receipt['release_tag'], receipt['source_commit'], receipt['platform'], Path(temp) / 'prior', config)
-        if prior['exists']:
-            old = Path(temp) / 'prior'
-            require(all(sha(old / n) == sha(directory / n) for n in names), 'refusing overwrite of different published bytes')
-            return {'reference': prior['reference'], 'digest': prior['reference'].split('@')[1]}
-        layout = Path(temp) / 'layout'
-        blobs = layout / 'blobs/sha256'
-        blobs.mkdir(parents=True)
-        def blob(raw, kind, title=None):
-            digest = hashlib.sha256(raw).hexdigest()
-            (blobs / digest).write_bytes(raw)
-            descriptor = {'mediaType': kind, 'digest': 'sha256:' + digest, 'size': len(raw)}
-            if title: descriptor['annotations'] = {'org.opencontainers.image.title': title}
-            return descriptor
-        created = run(['git', 'show', '-s', '--format=%cI', receipt['source_commit']]).decode().strip()
-        # Normalize UTC instead of preserving the author's timezone offset.
-        from datetime import datetime, timezone
-        created = datetime.fromisoformat(created).astimezone(timezone.utc).strftime('%Y-%m-%dT%H:%M:%SZ')
-        config_descriptor = blob(b'{}', 'application/vnd.oci.empty.v1+json')
-        manifest = {'schemaVersion': 2, 'mediaType': 'application/vnd.oci.image.manifest.v1+json', 'artifactType': TYPE,
-                    'config': config_descriptor, 'layers': [blob((directory / n).read_bytes(), media(n), n) for n in sorted(names)],
-                    'annotations': {'org.opencontainers.image.created': created, 'org.opencontainers.image.source': SOURCE,
-                                    'org.opencontainers.image.revision': receipt['source_commit'], 'org.opencontainers.image.version': receipt['release_tag']}}
-        desc = blob(encoded(manifest), manifest['mediaType'])
-        tag = f"{receipt['release_tag']}-{receipt['platform']}-arm64"
-        desc['annotations'] = {'org.opencontainers.image.ref.name': tag}
-        (layout / 'oci-layout').write_bytes(encoded({'imageLayoutVersion': '1.0.0'}))
-        (layout / 'index.json').write_bytes(encoded({'schemaVersion': 2, 'manifests': [desc]}))
-        late = existing(receipt['release_tag'], receipt['source_commit'], receipt['platform'], Path(temp) / 'late', config)
-        if late['exists']:
-            old = Path(temp) / 'late'
-            require(all(sha(old / n) == sha(directory / n) for n in names), 'refusing overwrite of bytes published during this build')
-            return {'reference': late['reference'], 'digest': late['reference'].split('@')[1]}
-        run(['oras', 'cp', '--from-oci-layout', '--to-registry-config', str(config), str(layout) + ':' + tag, PACKAGE + ':' + tag])
-        reference = PACKAGE + '@' + desc['digest']
-        verified = verify(reference, Path(temp) / 'verified', config)
-        require(verified == receipt, 'uploaded receipt differs')
-        return {'reference': reference, 'digest': desc['digest']}
+        downloaded = Path(temp)
+        for unique, original in expected.items():
+            path = directory / original
+            require(path.stat().st_size < MAX_ASSET_SIZE, 'GitHub per-file limit exceeded')
+            if unique in existing:
+                run(['gh', 'release', 'download', args.tag, '--repo', 'cybito/ghostty', '--dir', str(downloaded), '--pattern', unique])
+                prior = downloaded / unique
+                require(prior.is_file() and prior.stat().st_size == path.stat().st_size and sha(prior) == sha(path), 'refusing to overwrite different existing asset bytes')
+            else:
+                renamed = directory / unique
+                shutil.copy2(path, renamed)
+                try:
+                    run(['gh', 'release', 'upload', args.tag, str(renamed), '--repo', 'cybito/ghostty'])
+                finally:
+                    renamed.unlink(missing_ok=True)
+        check_args = argparse.Namespace(tag=args.tag, commit=args.commit, platform=args.platform, output_dir=str(Path(temp) / 'readback'))
+        result = check(check_args)
+        require(result.get('exists'), 'release asset readback failed')
+        return {'assets': result['assets'], 'release_tag': args.tag, 'platform': args.platform}
 
 
 def main():
@@ -278,20 +245,13 @@ def main():
         if command == 'pack': p.add_argument('--input-dir', required=True)
     p = commands.add_parser('publish')
     p.add_argument('--directory', required=True)
-    p.add_argument('--registry-config', required=True)
-    p = commands.add_parser('verify')
-    p.add_argument('--reference', required=True)
-    p.add_argument('--output-dir', required=True)
+    p.add_argument('--tag', required=True)
+    p.add_argument('--commit', required=True)
+    p.add_argument('--platform', choices=('darwin', 'linux'), required=True)
     args = parser.parse_args()
     if args.command == 'pack': result = pack(args)
     elif args.command == 'publish': result = publish(args)
-    else:
-        with tempfile.TemporaryDirectory() as temp:
-            config = Path(temp) / 'anonymous.json'
-            config.write_text('{"auths":{}}')
-            config.chmod(0o600)
-            if args.command == 'verify': result = verify(args.reference, absolute(args.output_dir), config)
-            else: result = existing(args.tag, args.commit, args.platform, absolute(args.output_dir), config)
+    else: result = check(args)
     print(json.dumps(result, sort_keys=True))
 
 
