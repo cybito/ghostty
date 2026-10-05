@@ -125,8 +125,10 @@ PY
 }
 
 smoke() {
-  local platform="$1" tag="$2" directory="$3" fixture="$RUNNER_TEMP/ghostty-fixture" diag="$RUNNER_TEMP/ghostty-smoke" binary
+  local runner_temp="${RUNNER_TEMP:?}"
+  local platform="$1" tag="$2" directory="$3" fixture="$runner_temp/ghostty-fixture" diag="${GHOSTTY_SMOKE_DIAG:-$runner_temp/ghostty-smoke}" binary
   mkdir -p "$fixture/home" "$fixture/config" "$fixture/prefix" "$diag"
+  printf 'smoke diagnostics: %s\n' "$diag"
   export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_CACHE_HOME="$fixture/cache" XDG_DATA_HOME="$fixture/data"
   if [[ "$platform" == darwin ]]; then
     local mount="$fixture/mount"; mkdir -p "$mount"; hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$directory/ghostty-$tag-darwin-arm64.dmg"; trap 'hdiutil detach "$mount" || true' EXIT
@@ -146,6 +148,7 @@ smoke() {
   "$binary" --help > "$diag/help.txt"; grep -q 'All configuration keys are available as command line options' "$diag/help.txt"; grep -q 'special command line argument.*-e' "$diag/help.txt"
   "$binary" +show-config --default --docs > "$diag/config-options.txt"
   for option in title config-default-files; do grep -q "$option" "$diag/config-options.txt"; done
+  printf 'CLI identity, help, and configuration checks passed\n'
   export SMOKE_BINARY="$binary" SMOKE_DIAG="$diag"
   if [[ "$platform" == linux ]]; then
     GDK_BACKEND=x11 LIBGL_ALWAYS_SOFTWARE=1 GALLIUM_DRIVER=llvmpipe GSK_RENDERER=cairo dbus-run-session -- xvfb-run -a bash -euo pipefail <<'SH'
@@ -161,6 +164,7 @@ SH
   else
     grep -q 'open -na' "$diag/help.txt"
     open -na "$fixture/prefix/share/applications/Ghostty.app" --env "HOME=$HOME" --env "XDG_CONFIG_HOME=$XDG_CONFIG_HOME" --args --config-default-files=false --title=custom-ci-ok -e /bin/sh -c 'printf "custom-ci-ok\n"; sleep 120'
+    printf 'Opened Ghostty; searching for titled terminal window and screenshot\n'
     cat > "$diag/window.swift" <<'SWIFT'
 import Cocoa
 import Vision
@@ -182,7 +186,7 @@ try VNImageRequestHandler(url: URL(fileURLWithPath: out + "/window.png")).perfor
 let text = (request.results ?? []).compactMap { $0.topCandidates(1).first?.string }.joined(separator: "\n")
 try text.write(toFile: out + "/ocr.txt", atomically: true, encoding: .utf8); guard text.contains("custom-ci-ok") else { fatalError("screenshot lacks terminal marker") }
 SWIFT
-    swift "$diag/window.swift" "$diag" > "$diag/gui.log" 2>&1
+    swift "$diag/window.swift" "$diag" 2>&1 | tee "$diag/gui.log"
     pkill -f "$fixture/prefix/share/applications/Ghostty.app/Contents/MacOS/ghostty" || true
   fi
   printf 'GUI window and screenshot marker verified\n' > "$diag/result.txt"

@@ -89,6 +89,8 @@ jobs:
       - name: Install fixture and prove native GUI window and screenshot
         id: smoke
         if: steps.check.outputs.exists != 'true'
+        env:
+          GHOSTTY_SMOKE_DIAG: ${{ runner.temp }}/ghostty-smoke
         run: bash .github/scripts/custom-release.sh smoke "$PLATFORM" "$RELEASE_TAG" "$RUNNER_TEMP/package"
       - name: Upload smoke diagnostics
         if: always() && steps.smoke.outcome != 'skipped'
