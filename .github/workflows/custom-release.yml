@@ -1,0 +1,163 @@
+name: Custom release
+on:
+  release:
+    types: [published]
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'cybito/ghostty' && !github.event.release.draft
+    runs-on: ubuntu-26.04-arm
+    outputs:
+      commit: ${{ steps.validate.outputs.commit }}
+      version: ${{ steps.validate.outputs.version }}
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.release.tag_name }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate immutable custom release source
+        id: validate
+        run: |
+          git fetch --no-tags origin +refs/heads/custom:refs/remotes/origin/custom
+          bash .github/scripts/custom-release.sh validate
+      - name: Exercise release boundary and installer regressions
+        run: bash .github/scripts/custom-release.sh regressions
+
+  build:
+    needs: validate
+    environment: forgejo-registry
+    timeout-minutes: 360
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: darwin
+            runner: macos-26
+            triple: aarch64-apple-darwin
+            oras_sha: f33fc12753c54172b0d0d19eaa0318d3f90fe9b094d96e8b259c881713c92e1c
+            zig_sha: b23d70deaa879b5c2d486ed3316f7eaa53e84acf6fc9cc747de152450d401489
+          - platform: linux
+            runner: ubuntu-26.04-arm
+            triple: aarch64-unknown-linux-gnu
+            oras_sha: ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca
+            zig_sha: ea4b09bfb22ec6f6c6ceac57ab63efb6b46e17ab08d21f69f3a48b38e1534f17
+    runs-on: ${{ matrix.runner }}
+    concurrency:
+      group: custom-release-${{ github.repository }}-${{ needs.validate.outputs.version }}-${{ matrix.platform }}
+      cancel-in-progress: false
+    env:
+      PLATFORM: ${{ matrix.platform }}
+      RELEASE_TAG: ${{ needs.validate.outputs.version }}
+      SOURCE_SHA: ${{ needs.validate.outputs.commit }}
+      ORAS_SHA: ${{ matrix.oras_sha }}
+      ZIG_SHA: ${{ matrix.zig_sha }}
+      NU_SHA: 302fb3dfc5d44e7fe0d5b8227be8e75b4c3956ca8d4804234e5c68fbdd3e4917
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-verified ORAS
+        run: bash .github/scripts/custom-release.sh tools "$PLATFORM"
+      - name: Reuse only a fully verified published identity
+        id: check
+        run: |
+          python3 .github/scripts/package-release.py check --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --output-dir "$RUNNER_TEMP/existing" > "$RUNNER_TEMP/check.json"
+          python3 - <<'PY'
+          import json, os, pathlib
+          r = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'check.json').read_text())
+          with open(os.environ['GITHUB_OUTPUT'], 'a') as f:
+              f.write('exists=' + str(r['exists']).lower() + '\n')
+          if r['exists']:
+              with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f: f.write('Verified existing package: `' + r['reference'] + '`\n')
+          PY
+      - name: Install checksum-verified build tools
+        if: steps.check.outputs.exists == 'false'
+        env:
+          INSTALL_BUILD_TOOLS: '1'
+        run: |
+          # Keep the already-verified ORAS, while installing the pinned compiler.
+          rm "$RUNNER_TEMP/custom-tools/bin/oras"
+          bash .github/scripts/custom-release.sh tools "$PLATFORM"
+      - name: Install Linux build and X11 smoke dependencies
+        if: steps.check.outputs.exists == 'false' && matrix.platform == 'linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends blueprint-compiler build-essential libbz2-dev libonig-dev libxml2-utils pandoc libadwaita-1-dev libgtk-4-dev libgtk4-layer-shell-dev desktop-file-utils xvfb xauth dbus-x11 mesa-vulkan-drivers libgl1-mesa-dri imagemagick x11-utils tesseract-ocr
+      - name: Build exact native ARM64 source
+        if: steps.check.outputs.exists == 'false'
+        run: bash .github/scripts/custom-release.sh build "$PLATFORM" "$RELEASE_TAG" "$SOURCE_SHA" "$RUNNER_TEMP/build-output"
+      - name: Package complete application resources
+        if: steps.check.outputs.exists == 'false'
+        run: python3 .github/scripts/package-release.py pack --tag "$RELEASE_TAG" --commit "$SOURCE_SHA" --platform "$PLATFORM" --input-dir "$RUNNER_TEMP/build-output" --output-dir "$RUNNER_TEMP/package"
+      - name: Install fixture and prove native GUI window and screenshot
+        id: smoke
+        if: steps.check.outputs.exists == 'false'
+        run: bash .github/scripts/custom-release.sh smoke "$PLATFORM" "$RELEASE_TAG" "$RUNNER_TEMP/package"
+      - name: Publish installation package and smoke diagnostics
+        if: always() && steps.smoke.outcome != 'skipped' && steps.check.outputs.exists == 'false'
+        env:
+          FORGEJO_REGISTRY_TOKEN: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          SMOKE_OUTCOME: ${{ steps.smoke.outcome }}
+        run: |
+          set +x
+          umask 077
+          mkdir -p "$RUNNER_TEMP/registry-auth"
+          chmod 700 "$RUNNER_TEMP/registry-auth"
+          auth="$RUNNER_TEMP/registry-auth/auth.json"
+          trap 'rm -f "$auth"; unset FORGEJO_REGISTRY_TOKEN' EXIT
+          test -n "$FORGEJO_REGISTRY_TOKEN"
+          printf '%s' "$FORGEJO_REGISTRY_TOKEN" | oras login git.cybit.top --username cybit --password-stdin --registry-config "$auth"
+          chmod 600 "$auth"
+          unset FORGEJO_REGISTRY_TOKEN
+          bash .github/scripts/custom-release.sh diagnostics "$PLATFORM" "$RELEASE_TAG" "$SOURCE_SHA" "$auth"
+          if [ "$SMOKE_OUTCOME" = success ]; then
+            python3 .github/scripts/package-release.py publish --directory "$RUNNER_TEMP/package" --registry-config "$auth" > "$RUNNER_TEMP/published.json"
+            python3 - <<'PY'
+          import json, os, pathlib, subprocess
+          r = json.loads((pathlib.Path(os.environ['RUNNER_TEMP']) / 'published.json').read_text())
+          subprocess.run(['python3', '.github/scripts/package-release.py', 'verify', '--reference', r['reference'], '--output-dir', os.environ['RUNNER_TEMP'] + '/anonymous-verification'], check=True)
+          with open(os.environ['GITHUB_STEP_SUMMARY'], 'a') as f: f.write('Verified immutable package: `' + r['reference'] + '`\n')
+          PY
+          else
+            echo 'GUI smoke failed; no installation package published.' >&2
+            exit 1
+          fi
+      - name: Remove registry credentials
+        if: always()
+        run: |
+          rm -f "$RUNNER_TEMP/registry-auth/auth.json"
+          unset FORGEJO_REGISTRY_TOKEN
+
+  summarize:
+    needs: [validate, build]
+    runs-on: ubuntu-26.04-arm
+    permissions:
+      contents: write
+    concurrency:
+      group: custom-release-notes-${{ github.repository }}-${{ needs.validate.outputs.version }}
+      cancel-in-progress: false
+    env:
+      RELEASE_TAG: ${{ needs.validate.outputs.version }}
+      SOURCE_SHA: ${{ needs.validate.outputs.commit }}
+      ORAS_SHA: ac7156f93a21e903f7ad606c792f3560f17e0cd0e36365634701b1e7cc4e4eca
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ needs.validate.outputs.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install checksum-verified anonymous ORAS
+        run: bash .github/scripts/custom-release.sh tools linux
+      - name: Verify both immutable references and preserve user release notes
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          umask 077
+          export ANON_CONFIG="$RUNNER_TEMP/anonymous.json"
+          printf '%s' '{"auths":{}}' > "$ANON_CONFIG"
+          bash .github/scripts/custom-release.sh summarize
