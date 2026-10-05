@@ -11,7 +11,15 @@ install_tools() {
 import hashlib, json, os, pathlib, tarfile, urllib.request
 p = os.environ['PLATFORM']; root = pathlib.Path(os.environ['TOOLS_DIR'])
 def get(url):
-    with urllib.request.urlopen(url, timeout=120) as r: return r.read()
+    headers = {}
+    if url.startswith('https://api.github.com/'):
+        headers = {
+            'Authorization': 'Bearer ' + os.environ['GH_TOKEN'],
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+        }
+    request = urllib.request.Request(url, headers=headers)
+    with urllib.request.urlopen(request, timeout=120) as r: return r.read()
 items = []
 if os.environ.get('INSTALL_BUILD_TOOLS') == '1':
     zig = json.loads(get('https://ziglang.org/download/index.json'))['0.16.0']['aarch64-' + ('macos' if p == 'darwin' else 'linux')]

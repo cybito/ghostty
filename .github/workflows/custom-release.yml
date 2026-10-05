@@ -73,12 +73,13 @@ jobs:
         if: steps.check.outputs.exists != 'true'
         env:
           INSTALL_BUILD_TOOLS: '1'
+          GH_TOKEN: ${{ github.token }}
         run: bash .github/scripts/custom-release.sh tools "$PLATFORM"
       - name: Install Linux build and X11 smoke dependencies
         if: steps.check.outputs.exists != 'true' && matrix.platform == 'linux'
         run: |
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends blueprint-compiler build-essential libbz2-dev libonig-dev libxml2-utils pandoc libadwaita-1-dev libgtk-4-dev libgtk4-layer-shell-dev desktop-file-utils xvfb xauth dbus-x11 mesa-vulkan-drivers libgl1-mesa-dri imagemagick x11-utils tesseract-ocr
+          sudo apt-get install -y --no-install-recommends blueprint-compiler build-essential gettext libbz2-dev libonig-dev libxml2-utils pandoc libadwaita-1-dev libgtk-4-dev libgtk4-layer-shell-dev desktop-file-utils xvfb xauth dbus-x11 mesa-vulkan-drivers libgl1-mesa-dri imagemagick x11-utils tesseract-ocr
       - name: Build exact native ARM64 source
         if: steps.check.outputs.exists != 'true'
         run: bash .github/scripts/custom-release.sh build "$PLATFORM" "$RELEASE_TAG" "$SOURCE_SHA" "$RUNNER_TEMP/build-output"
