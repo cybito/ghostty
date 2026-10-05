@@ -128,6 +128,12 @@ has_arch() {
   [[ " $1 " == *" $2 "* ]]
 }
 
+register_dmg_cleanup() {
+  local mount="$1" cleanup
+  printf -v cleanup 'hdiutil detach %q || true' "$mount"
+  trap "$cleanup" EXIT
+}
+
 smoke() {
   local runner_temp="${RUNNER_TEMP:?}"
   local platform="$1" tag="$2" directory="$3" fixture="$runner_temp/ghostty-fixture" diag="${GHOSTTY_SMOKE_DIAG:-$runner_temp/ghostty-smoke}" binary
@@ -135,7 +141,7 @@ smoke() {
   printf 'smoke diagnostics: %s\n' "$diag"
   export HOME="$fixture/home" XDG_CONFIG_HOME="$fixture/config" XDG_CACHE_HOME="$fixture/cache" XDG_DATA_HOME="$fixture/data"
   if [[ "$platform" == darwin ]]; then
-    local mount="$fixture/mount"; mkdir -p "$mount"; hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$directory/ghostty-$tag-darwin-arm64.dmg"; trap 'hdiutil detach "$mount" || true' EXIT
+    local mount="$fixture/mount"; mkdir -p "$mount"; hdiutil attach -readonly -nobrowse -mountpoint "$mount" "$directory/ghostty-$tag-darwin-arm64.dmg"; register_dmg_cleanup "$mount"
     "$mount/install.sh" --prefix "$fixture/prefix"; "$mount/install.sh" --prefix "$fixture/prefix"
     binary="$fixture/prefix/share/applications/Ghostty.app/Contents/MacOS/ghostty"
     codesign --verify --deep --strict "$fixture/prefix/share/applications/Ghostty.app"
@@ -231,6 +237,22 @@ regressions() {
   has_arch arm64 arm64 || { echo 'single-architecture binary rejected' >&2; return 1; }
   has_arch 'x86_64 arm64' arm64 || { echo 'universal binary arm64 slice rejected' >&2; return 1; }
   if has_arch 'x86_64 arm64e' arm64; then echo 'arm64e must not match arm64' >&2; return 1; fi
+  local detach_dir
+  detach_dir=$(mktemp -d)
+  printf -v cleanup_command 'rm -rf %q' "$detach_dir"
+  trap "$cleanup_command" EXIT
+  mkdir "$detach_dir/bin"
+  cat > "$detach_dir/bin/hdiutil" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" > "$DETACH_CAPTURE"
+SH
+  chmod +x "$detach_dir/bin/hdiutil"
+  export DETACH_CAPTURE="$detach_dir/captured"
+  (
+    export PATH="$detach_dir/bin:$PATH"
+    register_dmg_cleanup "$detach_dir/mount with spaces"
+  )
+  grep -Fx "detach $detach_dir/mount with spaces" "$DETACH_CAPTURE"
   python3 - <<'PY'
 import json, os, pathlib, runpy, shutil, subprocess, tempfile
 from argparse import Namespace
